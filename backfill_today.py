@@ -128,6 +128,8 @@ def calculate_rows(
     previous_low = None
     frozen_high = None
     frozen_low = None
+    first_hour_high = None
+    first_hour_low = None
     freeze_at = market_datetime(trading_date, FREEZE_TIME)
     rows: list[dict[str, Any]] = []
 
@@ -140,9 +142,21 @@ def calculate_rows(
         avwap_high = cum_high_volume / cum_volume if cum_volume else None
         avwap_low = cum_low_volume / cum_volume if cum_volume else None
 
-        if candle["end"] == freeze_at and avwap_high is not None and avwap_low is not None:
-            frozen_high = avwap_high
-            frozen_low = avwap_low
+        # Aggregate the first twenty 3-minute bars into the separate completed
+        # 09:15-10:15 hourly candle. The one-hour High/Low-source AVWAP values
+        # after that first bar are the hourly high and hourly low.
+        if candle["end"] <= freeze_at:
+            first_hour_high = (
+                candle["high"] if first_hour_high is None
+                else max(first_hour_high, candle["high"])
+            )
+            first_hour_low = (
+                candle["low"] if first_hour_low is None
+                else min(first_hour_low, candle["low"])
+            )
+        if candle["end"] == freeze_at:
+            frozen_high = first_hour_high
+            frozen_low = first_hour_low
 
         high_cross = None
         low_cross = None

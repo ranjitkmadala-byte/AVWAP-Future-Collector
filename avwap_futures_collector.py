@@ -91,6 +91,9 @@ class SymbolState:
     previous_avwap_low: float | None = None
     frozen_hour_avwap_high: float | None = None
     frozen_hour_avwap_low: float | None = None
+    first_hour_high: float | None = None
+    first_hour_low: float | None = None
+    first_hour_volume: int = 0
     first_tick_seen: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -339,6 +342,14 @@ class Collector:
         WHERE trading_date = %s
         GROUP BY instrument_key;
         """
+        first_hour_sql = """
+        SELECT instrument_key, MAX(high), MIN(low), COALESCE(SUM(volume), 0)::bigint
+        FROM public.avwap_futures_3m
+        WHERE trading_date = %s
+          AND (candle_start AT TIME ZONE 'Asia/Kolkata')::time >= TIME '09:15'
+          AND (candle_end AT TIME ZONE 'Asia/Kolkata')::time <= TIME '10:15'
+        GROUP BY instrument_key;
+        """
         with db_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(totals_sql, (trading_date,))
@@ -357,6 +368,13 @@ class Collector:
                         state.previous_avwap_low = float(avl) if avl is not None else None
                         state.frozen_hour_avwap_high = float(hour_h) if hour_h is not None else None
                         state.frozen_hour_avwap_low = float(hour_l) if hour_l is not None else None
+                cur.execute(first_hour_sql, (trading_date,))
+                for key, hour_high, hour_low, hour_volume in cur.fetchall():
+                    state = self.states.get(key)
+                    if state:
+                        state.first_hour_high = float(hour_high) if hour_high is not None else None
+                        state.first_hour_low = float(hour_low) if hour_low is not None else None
+                        state.first_hour_volume = int(hour_volume)
         LOG.info("Restored today's completed AVWAP state from Neon")
 
     def heartbeat(self, status: str, message: str = "") -> None:
@@ -495,10 +513,22 @@ class Collector:
             state.cum_low_volume / state.cum_volume if state.cum_volume else None
         )
 
-        # The 10:12-10:15 bar completes the first 60-minute window.
-        if bar_end == freeze_at and avwap_high is not None and avwap_low is not None:
-            state.frozen_hour_avwap_high = avwap_high
-            state.frozen_hour_avwap_low = avwap_low
+        # Build the separate 09:15-10:15 hourly candle. On the one-hour
+        # timeframe, a High-source AVWAP after its first completed bar equals
+        # that hourly candle's high; the Low-source AVWAP equals its low.
+        if open_at <= bar.start and bar_end <= freeze_at:
+            state.first_hour_high = (
+                bar.high if state.first_hour_high is None
+                else max(state.first_hour_high, bar.high)
+            )
+            state.first_hour_low = (
+                bar.low if state.first_hour_low is None
+                else min(state.first_hour_low, bar.low)
+            )
+            state.first_hour_volume += bar.volume
+        if bar_end == freeze_at:
+            state.frozen_hour_avwap_high = state.first_hour_high
+            state.frozen_hour_avwap_low = state.first_hour_low
 
         high_cross = None
         low_cross = None
