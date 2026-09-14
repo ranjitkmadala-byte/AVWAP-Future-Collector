@@ -1,1 +1,1 @@
-worker: python avwap_futures_holiday_safe.py
+worker: python avwap_futures_otm_oi_collector.py
